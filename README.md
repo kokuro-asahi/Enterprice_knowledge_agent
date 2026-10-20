@@ -33,6 +33,7 @@ uvicorn app.main:app --reload
 ```
 
 `AGENT_BACKEND=echo` is the default development mode. Set `AGENT_BACKEND=deepagents` and provide model credentials to use Deep Agents.
+`MODEL_TIMEOUT_SECONDS` controls the backend's single model-call timeout (default: `60`). For long-context tests, set it to a value such as `600` and restart the backend.
 Set `BOCHA_API_KEY` to enable the `bocha_search` web search tool.
 `MODEL_GUARD_ENABLED=true` runs a lightweight model-disclosure guard before the main Agent call. Requests about model identity, internal performance parameters, prompts, or implementation details return `MODEL_GUARD_RESPONSE`; all other requests continue to the original Agent flow.
 
@@ -41,8 +42,12 @@ Set `BOCHA_API_KEY` to enable the `bocha_search` web search tool.
 ### 企业规章制度知识库
 
 新建会话选择角色 `enterprise_policy_advisor`（企业规章制度顾问），并手动勾选
-`enterprise-policy` 技能。所有技能依然默认关闭。此技能提供制度检索、条款解释、
+`enterprise-policy` 技能。API 请求默认不启用技能。此技能提供知识库检索、条款解释、
 流程梳理和来源引用，不修改知识库。
+
+勾选技能后，Agent 可调用 `search_enterprise_policy` 查询知识库。
+`bocha_search`（联网搜索）和 `get_current_time` 默认注册。
+已有会话沿用创建时的技能选择；未启用知识库技能的会话需新建并勾选技能。
 
 后端通过 MCP Streamable HTTP 连接现有知识库的 `search_policy` 工具。
 `POLICY_MCP_URL` 默认是 `http://10.1.80.12:9020/mcp`，对应该服务允许的 Host。

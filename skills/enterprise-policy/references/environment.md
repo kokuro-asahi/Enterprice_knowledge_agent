@@ -1,6 +1,6 @@
 # enterprise-policy 环境配置
 
-本 skill 的说明和检索工具是两部分：`SKILL.md` 指导 Agent 如何使用制度资料；`scripts/tools.py` 提供只读的 `search_enterprise_policy` 工具。后端仅在启用 `enterprise-policy` 时自动加载该入口并注册工具。
+`SKILL.md` 指导 Agent 如何查询和使用制度资料。`scripts/tools.py` 提供只读 MCP 查询实现；启用 enterprise-policy 技能时，`get_tools()` 向 Agent 注册 `search_enterprise_policy`。以下配置用于连接知识库服务。
 
 将此 skill 复制到另一套相同架构的 Agent 后，在该项目的 `.env` 配置以下变量，再重启后端：
 
@@ -23,4 +23,4 @@ POLICY_MCP_TOKEN=replace-with-a-secret
 
 至少提供其中一种认证方式。不要把令牌、真实内网地址或 `.env` 内容写入 `SKILL.md`、参考文件、前端或版本控制。
 
-若目标项目没有企业制度 MCP，仍可复制该目录作为说明模板，但不要在前端暴露或允许选择 `enterprise-policy`，直到对应的只读工具已实现并注册。
+若目标项目没有企业制度 MCP，仍可复制该目录，用于指导解读用户提供的制度原文；自动检索需要可用的 MCP 服务和正确的认证配置。

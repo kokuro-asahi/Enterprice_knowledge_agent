@@ -44,8 +44,10 @@ async def _search_policy(arguments: dict[str, Any]) -> dict[str, Any]:
 def search_enterprise_policy(
     query: str, top_k: int = 5, candidates: int = 20, file_id: str | None = None,
 ) -> dict[str, Any]:
-    """检索企业内部规章制度原文，返回标题、条款、页码、文件 ID 和内容。
+    """优先检索本地企业制度原文，返回标题、条款、页码、文件 ID 和内容。
 
+    企业制度咨询、合同审查及法务风险分析应先调用本工具，查询相关的管理、审批
+    和合规要求，再按缺口补充联网法规。query 使用主题和风险关键词，不提交合同全文。
     file_id 可限定制度文件。仅用于查询，不能修改或发布制度。
     """
     if not query.strip():
@@ -65,5 +67,5 @@ def search_enterprise_policy(
 
 
 def get_tools() -> list[object]:
-    """Return the tool functions to register when this skill is enabled."""
+    """Register policy retrieval when the enterprise-policy skill is enabled."""
     return [search_enterprise_policy]

@@ -12,7 +12,7 @@ class AgentRuntime:
         self._checkpointer_pool: Any | None = None
         self.checkpointer: Any | None = None
         self.agent: Any | None = None
-        self._agents_by_skill_set: dict[tuple[str, ...], Any] = {}
+        self._agents_by_skill_set: dict[tuple[tuple[str, ...], str | None], Any] = {}
 
     def start(self) -> None:
         if self.settings.agent_backend == "echo":
@@ -32,13 +32,25 @@ class AgentRuntime:
         # Agent graphs are built lazily per selected skill set. This keeps skills
         # that were not selected for a thread out of that thread's discovery scope.
 
-    def deep_agent_kwargs(self, skill_paths: list[str] | None = None, active_skill_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+    def deep_agent_kwargs(
+        self,
+        skill_paths: list[str] | None = None,
+        active_skill_ids: tuple[str, ...] = (),
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        from app.planning import TaskPlanningMiddleware
+
         kwargs: dict[str, Any] = {
             "model": self.create_model(),
             "tools": get_agent_tools(active_skill_ids),
             "checkpointer": self.checkpointer,
+            "middleware": [TaskPlanningMiddleware()],
         }
         skills = skill_paths or []
+        if system_prompt:
+            # DeepAgents puts this message before all conversation state.
+            # Local OpenAI-compatible providers often require that ordering.
+            kwargs["system_prompt"] = system_prompt
         if skills:
             from deepagents.backends.composite import CompositeBackend
             from deepagents.backends.filesystem import FilesystemBackend
@@ -52,7 +64,7 @@ class AgentRuntime:
             kwargs["skills"] = ["/"]
         return kwargs
 
-    def get_agent(self, active_skill_ids: list[str]) -> Any:
+    def get_agent(self, active_skill_ids: list[str], system_prompt: str | None = None) -> Any:
         if self.settings.agent_backend == "echo":
             return None
         if self.checkpointer is None:
@@ -60,10 +72,10 @@ class AgentRuntime:
         from app.skills import SkillRegistry
         from deepagents import create_deep_agent
 
-        key = tuple(sorted(set(active_skill_ids)))
+        key = (tuple(sorted(set(active_skill_ids))), system_prompt)
         if key not in self._agents_by_skill_set:
             self._agents_by_skill_set[key] = create_deep_agent(
-                **self.deep_agent_kwargs(SkillRegistry(self.settings).paths_for(key), key)
+                **self.deep_agent_kwargs(SkillRegistry(self.settings).paths_for(key[0]), key[0], system_prompt)
             )
         return self._agents_by_skill_set[key]
 
@@ -119,7 +131,7 @@ class AgentRuntime:
             temperature=temperature,
             stream_usage=True,
             max_retries=2,
-            timeout=60,
+            timeout=self.settings.model_timeout_seconds,
         )
 
     def build_database_uri(self) -> str:
@@ -135,6 +147,26 @@ class AgentRuntime:
 
     def config(self, user_id: str, thread_id: str, context_version: int = 1) -> dict[str, Any]:
         return {"configurable": {"thread_id": self.storage_thread_id(user_id, thread_id, context_version)}}
+
+    def get_todos(self, user_id: str, thread_id: str, context_version: int = 1) -> list[dict[str, str]]:
+        if self.checkpointer is None:
+            return []
+        checkpoint = self.checkpointer.get_tuple(self.config(user_id, thread_id, context_version))
+        if checkpoint is None:
+            return []
+        return normalize_todos(checkpoint.checkpoint.get("channel_values", {}).get("todos"))
+
+
+def normalize_todos(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {"content": item["content"], "status": item["status"]}
+        for item in value
+        if isinstance(item, dict)
+        and isinstance(item.get("content"), str)
+        and item.get("status") in ("pending", "in_progress", "completed")
+    ]
 
 
 runtime = AgentRuntime(get_settings())

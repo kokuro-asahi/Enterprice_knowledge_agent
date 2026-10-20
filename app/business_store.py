@@ -333,6 +333,18 @@ class BusinessStore:
             ).fetchall()
         return [str(row["user_id"]) for row in rows]
 
+    def latest_run_status(self, user_id: str, thread_id: str) -> str | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT status FROM agent_runs
+                WHERE user_id = %s AND thread_id = %s
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id, thread_id),
+            ).fetchone()
+        return row["status"] if row else None
+
     def list_threads(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """List a user's conversations with a compact title derived from their first prompt."""
         with self.connection() as conn:

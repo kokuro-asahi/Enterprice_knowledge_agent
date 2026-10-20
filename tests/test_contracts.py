@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.agent import _enforce_tool_call_limit, _extract_stream_text, _extract_stream_tool_calls
 from app.config import _csv_env
 from app.errors import AppError, classify_run_error, http_exception_handler, validate_image_inputs
-from app.model_messages import model_messages
+from app.model_messages import agent_system_prompt, model_messages
 from app.model_guard import ModelDisclosureGuard, _CLASSIFIER_SYSTEM_PROMPT, _is_block_decision
 from app.role_prompts import load_role_prompt
 from app.retry import retry_sync
@@ -34,6 +34,114 @@ def test_csv_env_parses_agent_skill_paths():
         "shared/skills",
         "personal-skills",
     ]
+
+
+def test_plan_stream_uses_applied_state_and_can_be_restored(monkeypatch, tmp_path):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from pydantic import Field
+
+    from app.agent import AgentClient
+
+    class PlanningModel(FakeMessagesListChatModel):
+        bindings: list = Field(default_factory=list)
+
+        def bind_tools(self, tools, **kwargs):
+            assert "write_todos" in {tool.name for tool in tools}
+            self.bindings.append(({tool.name for tool in tools}, kwargs.get("tool_choice")))
+            return self
+
+    def update(status, call_id):
+        return AIMessage(content="", tool_calls=[{
+            "name": "write_todos",
+            "args": {"todos": [{"content": "核对依据", "status": status}]},
+            "id": call_id,
+            "type": "tool_call",
+        }])
+
+    model = PlanningModel(responses=[update("in_progress", "plan-1"), update("completed", "plan-2"), AIMessage(content="这是回答")])
+    settings = SimpleNamespace(agent_backend="deepagents", max_tool_calls=50, agent_filesystem_root=str(tmp_path), agent_skills_paths=())
+    runtime = AgentRuntime(settings)
+    runtime.checkpointer = InMemorySaver()
+    monkeypatch.setattr(runtime, "create_model", lambda: model)
+    monkeypatch.setattr("app.agent.runtime", runtime)
+
+    async def collect():
+        return [event async for event in AgentClient(settings).astream_events(
+            [{"role": "user", "content": "请核对后回答"}], "user", "thread", 1, [],
+        )]
+
+    events = asyncio.run(collect())
+    plans = [event["todos"] for event in events if event["type"] == "plan"]
+    assert plans == [
+        [{"content": "核对依据", "status": "in_progress"}],
+        [{"content": "核对依据", "status": "completed"}],
+    ]
+    assert "".join(event["text"] for event in events if event["type"] == "text") == "这是回答"
+    assert runtime.get_todos("user", "thread", 1) == plans[-1]
+    assert runtime.get_todos("another-user", "thread", 1) == []
+    assert runtime.get_todos("user", "thread", 2) == []
+    assert model.bindings[0] == ({"write_todos"}, {"type": "function", "function": {"name": "write_todos"}})
+    assert "get_current_time" in model.bindings[1][0]
+    assert "bocha_search" in model.bindings[1][0]
+    assert model.bindings[1][1] is None
+
+
+def test_each_user_turn_requires_its_own_successful_plan():
+    from langchain.agents.middleware.types import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from app.planning import TaskPlanningMiddleware
+
+    middleware = TaskPlanningMiddleware()
+    messages = [
+        HumanMessage(content="第一轮任务"),
+        AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "old-plan"}]),
+        ToolMessage(content="Updated todo list", tool_call_id="old-plan"),
+    ]
+    request = ModelRequest(model=None, messages=messages, tools=middleware.tools, state={"messages": messages})
+    assert middleware._plan_first(request).tool_choice is None
+    messages = [*messages, HumanMessage(content="第二轮任务")]
+    request = request.override(messages=messages, state={"messages": messages})
+    assert middleware._plan_first(request).tool_choice["function"]["name"] == "write_todos"
+    failed_messages = [
+        *messages,
+        AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": []}, "id": "new-plan"}]),
+        ToolMessage(content="Invalid plan", tool_call_id="new-plan", status="error"),
+    ]
+    request = request.override(messages=failed_messages, state={"messages": failed_messages})
+    assert middleware._plan_first(request).tool_choice["function"]["name"] == "write_todos"
+
+
+def test_message_history_restores_plan_for_current_context(monkeypatch):
+    from app.services import RunService, business_store, runtime
+
+    monkeypatch.setattr(business_store, "get_thread", lambda *args: {"context_version": 2})
+    monkeypatch.setattr(business_store, "paged_conversations", lambda *args: ([], 0))
+    monkeypatch.setattr(business_store, "latest_run_status", lambda *args: "completed")
+
+    def get_todos(user_id, thread_id, context_version):
+        assert (user_id, thread_id, context_version) == ("user", "thread", 2)
+        return [{"content": "核对依据", "status": "completed"}]
+
+    monkeypatch.setattr(runtime, "get_todos", get_todos)
+    history = asyncio.run(RunService().messages("user", "thread", 1, 100))
+    assert history.model_dump()["todos"] == [{"content": "核对依据", "status": "completed"}]
+    assert history.run_status == "completed"
+
+
+def test_unknown_thread_does_not_read_checkpoint_plan(monkeypatch):
+    from app.services import RunService, business_store, runtime
+
+    monkeypatch.setattr(business_store, "get_thread", lambda *args: None)
+
+    def unexpected(*args):
+        raise AssertionError("A missing thread must not read checkpoint data")
+
+    monkeypatch.setattr(runtime, "get_todos", unexpected)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(RunService().messages("user", "thread", 1, 100))
+    assert exc.value.status_code == 404
 
 
 def test_skill_paths_are_exposed_as_deepagents_virtual_paths(tmp_path):
@@ -387,15 +495,11 @@ def test_tool_call_limit_counts_completed_callbacks():
     }
 
 
-def test_custom_agent_prompt_is_used_as_system_message():
-    messages = model_messages(
-        None,
-        "你是一个自定义 Agent。",
-        [{"type": "text", "text": "hi"}],
-    )
+def test_custom_agent_prompt_is_separate_from_conversation_state():
+    messages = model_messages([{"type": "text", "text": "hi"}])
 
-    assert messages[0] == {"role": "system", "content": "你是一个自定义 Agent。"}
-    assert messages[1]["role"] == "user"
+    assert messages == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    assert agent_system_prompt(None, "你是一个自定义 Agent。") == "你是一个自定义 Agent。"
 
 
 def test_model_guard_skips_classification_in_echo_mode():
@@ -483,10 +587,11 @@ def test_usage_supports_response_metadata_token_usage_shape():
     assert usage == {"input_tokens": 11, "output_tokens": 5, "total_tokens": 16}
 
 
-def test_agent_tools_include_bocha_search():
+def test_agent_tools_include_web_search():
     tool_names = {tool.__name__ for tool in get_agent_tools()}
 
-    assert {"get_current_time", "bocha_search"} <= tool_names
+    assert "get_current_time" in tool_names
+    assert "bocha_search" in tool_names
 
 
 def test_bocha_result_is_normalized_for_agent_output():

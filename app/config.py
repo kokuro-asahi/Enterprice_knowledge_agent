@@ -47,6 +47,7 @@ class Settings:
     agent_filesystem_root: str = getenv("AGENT_FILESYSTEM_ROOT", str(PROJECT_ROOT))
     agent_skills_paths: tuple[str, ...] = tuple(_csv_env(getenv("AGENT_SKILLS_PATHS"), "skills"))
     max_tool_calls: int = _int_env("MAX_TOOL_CALLS", 10)
+    model_timeout_seconds: int = _int_env("MODEL_TIMEOUT_SECONDS", 60)
     openai_api_key: str | None = getenv("OPENAI_API_KEY") or getenv("DASHSCOPE_API_KEY")
     openai_base_url: str | None = getenv("OPENAI_BASE_URL") or getenv("BASE_URL")
     public_base_url: str = getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")

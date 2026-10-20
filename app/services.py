@@ -8,7 +8,7 @@ from app.agent import AgentClient
 from app.business_store import business_store
 from app.config import get_settings
 from app.errors import classify_run_error, preflight_image_downloads, raise_thread_not_found
-from app.model_messages import model_messages
+from app.model_messages import agent_system_prompt, model_messages
 from app.model_guard import ModelDisclosureGuard
 from app.observability import current_request_id, duration_ms, log_agent_event, run_context
 from app.runtime import runtime
@@ -164,11 +164,12 @@ class RunService:
                     )
                 result = await _agent_invoke_event(
                     self.agent.ainvoke,
-                    model_messages(agent_role, agent_prompt, content),
+                    model_messages(content),
                     request.user_id,
                     thread_id,
                     context_version,
                     active_skill_ids,
+                    agent_system_prompt(agent_role, agent_prompt),
                     input_summary={
                         "mode": "json",
                         "agent_role": agent_role,
@@ -224,6 +225,7 @@ class RunService:
                 status="completed",
                 message=result["message"],
                 usage=Usage(**result.get("usage", {})),
+                todos=result.get("todos", []),
             )
         except Exception as exc:
             with run_context(
@@ -307,6 +309,7 @@ class RunService:
 
         chunks: list[str] = []
         trace_messages: list[dict[str, Any]] = []
+        todos: list[dict[str, str]] = []
         usage = empty_usage()
         try:
             with run_context(
@@ -390,11 +393,12 @@ class RunService:
                 )
                 try:
                     async for event in self.agent.astream_events(
-                        model_messages(agent_role, agent_prompt, content),
+                        model_messages(content),
                         request.user_id,
                         thread_id,
                         context_version,
                         active_skill_ids,
+                        agent_system_prompt(agent_role, agent_prompt),
                     ):
                         if event["type"] == "text":
                             text = event["text"]
@@ -405,6 +409,9 @@ class RunService:
                             tool_event = tool_trace_sse_event(run_id, event["message"])
                             if tool_event:
                                 yield tool_event
+                        elif event["type"] == "plan":
+                            todos = event["todos"]
+                            yield "plan.updated", {"run_id": run_id, "thread_id": thread_id, "todos": todos}
                         elif event["type"] == "usage":
                             add_usage(usage, event["usage"])
                         elif event["type"] == "usage_total":
@@ -479,6 +486,7 @@ class RunService:
                 status="completed",
                 message=message,
                 usage=Usage(**usage),
+                todos=todos,
             ).model_dump(mode="json")
         except Exception as exc:
             with run_context(
@@ -501,6 +509,7 @@ class RunService:
                 "run_id": run_id,
                 "status": "failed",
                 "error": error,
+                "todos": todos,
             }
 
     async def reset_context(self, user_id: str, thread_id: str) -> ContextResetResponse:
@@ -518,6 +527,8 @@ class RunService:
         if not thread:
             raise_thread_not_found()
         rows, total = await to_thread(business_store.paged_conversations, user_id, thread_id, page, page_size)
+        todos = await to_thread(runtime.get_todos, user_id, thread_id, int(thread["context_version"]))
+        run_status = await to_thread(business_store.latest_run_status, user_id, thread_id)
         pages = (total + page_size - 1) // page_size if total else 0
         return ThreadMessagesResponse(
             user_id=user_id,
@@ -528,6 +539,8 @@ class RunService:
             total_messages=total,
             has_more=page < pages,
             messages=rows,
+            todos=todos,
+            run_status=run_status,
         )
 
 
@@ -584,7 +597,16 @@ async def _db_event(event_name: str, operation, *args, input_summary: dict[str, 
     return result
 
 
-async def _agent_invoke_event(operation, messages, user_id: str, thread_id: str, context_version: int, active_skill_ids: list[str], input_summary):
+async def _agent_invoke_event(
+    operation,
+    messages,
+    user_id: str,
+    thread_id: str,
+    context_version: int,
+    active_skill_ids: list[str],
+    system_prompt: str | None,
+    input_summary,
+):
     start_time = perf_counter()
     log_agent_event(
         event_type="model",
@@ -593,7 +615,7 @@ async def _agent_invoke_event(operation, messages, user_id: str, thread_id: str,
         input_summary=input_summary,
     )
     try:
-        result = await operation(messages, user_id, thread_id, context_version, active_skill_ids)
+        result = await operation(messages, user_id, thread_id, context_version, active_skill_ids, system_prompt)
     except Exception as exc:
         log_agent_event(
             event_type="model",

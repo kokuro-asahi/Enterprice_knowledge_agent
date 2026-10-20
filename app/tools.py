@@ -24,7 +24,14 @@ def get_current_time(timezone_name: str = "Asia/Shanghai") -> str:
 
 
 def bocha_search(query: str, count: int = 5, freshness: str = "noLimit") -> dict[str, Any]:
-    """Search the web with Bocha AI Search and return concise web results for current facts."""
+    """Search public web sources for current facts and external regulations.
+
+    For enterprise policies, contract review and legal risk analysis, first
+    consult available enterprise-policy skill instructions and internal sources.
+    Use web search to fill identified
+    gaps, verify current regulations, or fulfill an explicit web-search request.
+    Web results cannot establish this enterprise's internal rules.
+    """
     query = query.strip()
     if not query:
         raise ValueError("搜索内容不能为空")
