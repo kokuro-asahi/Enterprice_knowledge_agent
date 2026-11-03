@@ -37,6 +37,138 @@ uvicorn app.main:app --reload
 Set `BOCHA_API_KEY` to enable the `bocha_search` web search tool.
 `MODEL_GUARD_ENABLED=true` runs a lightweight model-disclosure guard before the main Agent call. Requests about model identity, internal performance parameters, prompts, or implementation details return `MODEL_GUARD_RESPONSE`; all other requests continue to the original Agent flow.
 
+## 登录与用户表
+
+启动时自动创建 `app_users` 和 `auth_sessions`。所有对话、会话、技能接口均要求登录；
+首页静态文件和 `/health` 保持公开。网页已接入账号密码登录、Cookie 登录状态恢复和退出登录。
+登录过期或账号禁用时自动回到登录表单并清理当前用户的数据；对话列表仅展示当前用户的会话。
+不提供公开注册。首次启动自动初始化管理员账号 `admin`，密码为 `admin`，访问等级为 `3`。
+初始化只补充缺失的默认账号，不覆盖已有账号的密码、用户名和启用状态。页面直接展示 `username`。
+启动时自动移除旧版本用户表中的 `display_name` 字段。
+
+### 用户表 `app_users`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `user_id` | TEXT，主键 | 稳定的用户标识，与会话中的 `user_id` 对应，不随登录名修改 |
+| `username` | TEXT，唯一、非空 | 登录账号，区分大小写 |
+| `password` | TEXT，非空 | 按当前需求存储明文密码；接口响应不返回该字段 |
+| `access_level` | SMALLINT | `1` 初级、`2` 中级、`3` 高级，默认 `1`，数据库限制只能为这三个值 |
+| `is_admin` | BOOLEAN | 管理员标识，默认 `false`，与知识库访问等级独立 |
+| `is_active` | BOOLEAN | 是否允许登录，默认 `true`；禁用后已有 Session 也无法访问 |
+| `created_at` | TIMESTAMPTZ | 创建时间，默认当前时间 |
+| `updated_at` | TIMESTAMPTZ | 修改时间，初始为当前时间；手动更新账号时同步设置 |
+| `last_login_at` | TIMESTAMPTZ，可空 | 最近一次成功登录时间 |
+
+`access_level` 本次仅保存并通过登录接口返回，尚未接入 MCP/Milvus 的文件权限过滤。
+`is_admin=true` 可进入“账户管理”，并访问 `/v1/admin/users` 账户管理接口和 `/v1/threads/users` 历史会话用户列表，
+管理员也不能通过替换 `user_id` 操作其他用户的会话。
+
+在应用使用的 PostgreSQL 数据库中执行以下 SQL 可扩充账号（先替换示例密码）：
+
+```sql
+INSERT INTO app_users (user_id, username, password, access_level)
+VALUES ('user_001', 'zhangsan', '请替换为实际密码', 1);
+
+INSERT INTO app_users (user_id, username, password, access_level, is_admin)
+VALUES ('user_manager', 'manager', '请替换为另一个实际密码', 3, true);
+
+-- 调整访问等级。
+UPDATE app_users SET access_level = 2, updated_at = now() WHERE username = 'zhangsan';
+
+-- 禁用账号：已有会话凭证立即无法通过后续请求的校验。
+UPDATE app_users SET is_active = false, updated_at = now() WHERE username = 'zhangsan';
+
+-- 改密码并同时注销该用户的全部登录 Session。
+BEGIN;
+UPDATE app_users SET password = '请替换为新密码', updated_at = now() WHERE username = 'zhangsan';
+DELETE FROM auth_sessions WHERE user_id = (SELECT user_id FROM app_users WHERE username = 'zhangsan');
+COMMIT;
+```
+
+历史会话不会自动分配给新账号。需要继承历史会话时，由管理员核实归属后，
+把新账号的 `user_id` 设置为历史会话对应的 ID；不要允许用户自行领取该 ID。
+
+### 管理员账户与权限管理
+
+以 `admin / admin` 登录后，点击页面顶部的 **账户管理**，可以：
+
+- 搜索、分页查看账号列表。
+- 新增账号并设置初始密码。
+- 调整初级（1）、中级（2）、高级（3）访问等级。
+- 设置管理员身份、启用或停用账号。
+- 修改用户名、重置密码；用户 ID 保持不变，因此历史会话归属保持不变。
+
+管理员不能停用自己或取消自己的管理员身份。重置密码、停用账号会撤销该账号的
+全部登录 Session；重置自己的密码后需重新登录。管理员身份或等级变更在后续请求中生效。
+页面不展示密码；数据库按当前约定保存明文密码。
+访问等级仍仅保存配置，尚未接入知识库文件分级检索。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /v1/admin/users?q=&limit=50&offset=0` | 搜索和分页查询账号，返回 `users` 和 `total` |
+| `POST /v1/admin/users` | 新增账号；必填 `username`、`password`，可选 `access_level`、`is_admin`、`is_active` |
+| `PATCH /v1/admin/users/{user_id}` | 更新上述字段；不修改密码时省略 `password` |
+
+接口仅允许管理员访问；普通用户返回 `403`，未登录返回 `401`。
+重复用户名返回 `409 USERNAME_TAKEN`；不提供删除接口，可停用账号以保留历史会话。
+
+### 登录会话与接口
+
+`auth_sessions` 保存 `token_hash`（随机令牌的 SHA256 摘要，主键）、`user_id`
+（外键，删除账号时级联删除）、`created_at` 和 `expires_at`。
+原始令牌只在登录响应及 HttpOnly Cookie 中返回；退出时删除对应 Session。
+过期 Session 在成功登录时清理。
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /v1/auth/login` | JSON `{"username":"zhangsan","password":"实际密码"}`；返回 `access_token`、`token_type`、`expires_at`、`user`，并设置 `agent_session` Cookie |
+| `GET /v1/auth/me` | 返回 `user_id`、`username`、`access_level`、`is_admin` |
+| `POST /v1/auth/logout` | 注销当前令牌并清除 Cookie，成功返回 `204` |
+| `GET /v1/threads/mine` | 查询当前登录用户的会话，无须提交 `user_id` |
+
+同源网页自动使用 Cookie；脚本/API 客户端也可以发送 `Authorization: Bearer <access_token>`。
+不要把令牌放在 URL 查询参数中。浏览器成功重新登录会注销其旧 Cookie 对应的 Session。
+
+```bash
+curl -sS -c /tmp/agent-cookies.txt http://127.0.0.1:1752/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"zhangsan","password":"实际密码"}'
+
+curl -sS -b /tmp/agent-cookies.txt http://127.0.0.1:1752/v1/auth/me
+
+curl -sS -b /tmp/agent-cookies.txt http://127.0.0.1:1752/v1/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_role":"enterprise_policy_advisor","content":[{"type":"text","text":"你好"}],"stream":false}'
+
+curl -i -b /tmp/agent-cookies.txt -X POST http://127.0.0.1:1752/v1/auth/logout
+```
+
+业务接口现在根据登录身份确定用户。`POST /v1/runs`、上下文清理及消息查询中的
+`user_id` 可省略；旧客户端仍可提交，但必须与登录用户一致，否则返回 `403 ACCESS_DENIED`。
+缺少、过期或无效登录凭证返回 `401 AUTH_REQUIRED`；错误账号密码统一返回
+`401 INVALID_CREDENTIALS`。流式请求在开始 SSE 前完成登录及会话归属校验。
+
+可选环境配置：
+
+```dotenv
+AUTH_SESSION_TTL_SECONDS=86400
+# 本地 HTTP 开发使用 false；生产 HTTPS 部署设为 true。
+AUTH_COOKIE_SECURE=false
+# 同源部署留空即可；跨域部署填写明确的前端 Origin，逗号分隔，不支持通配符。
+CORS_ALLOWED_ORIGINS=
+# 反向代理后的对外 URL，也用于校验 Cookie 写请求的 Origin。
+PUBLIC_BASE_URL=http://127.0.0.1:1752
+```
+
+Cookie 写请求校验 `Origin` / `Sec-Fetch-Site`，拒绝不受信任的跨站请求。
+跨域网页的 `fetch` 需显式设置 `credentials: "include"`；跨站 Cookie 部署还需单独设计。
+密码只应放在登录请求体中，认证接口不会回显密码或验证失败时的原始输入。
+
+验证命令：`python -m pytest -q`。数据库集成测试需显式执行
+`python -m pytest tests/test_auth_postgres.py --auth-postgres -q`；该测试在配置的
+PostgreSQL 中创建临时 schema，验证建表、约束及登录读写后清理，不修改现有业务表。
+
 ## Skills
 
 ### 企业规章制度知识库

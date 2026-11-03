@@ -32,6 +32,9 @@ def _int_env(name: str, default: int) -> int:
 
 
 class Settings:
+    auth_session_ttl_seconds: int = max(60, _int_env("AUTH_SESSION_TTL_SECONDS", 86400))
+    auth_cookie_secure: bool = getenv("AUTH_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+    cors_allowed_origins: tuple[str, ...] = tuple(_csv_env(getenv("CORS_ALLOWED_ORIGINS")))
     pg_user: str = getenv("PG_USER", "agent")
     pg_password: str = getenv("PG_PASSWORD", "agent")
     pg_database: str = getenv("PG_DATABASE", "agent_backend")

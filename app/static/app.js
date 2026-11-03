@@ -10,17 +10,46 @@ const els = {
   statusDot: document.querySelector("#statusDot"),
   settingsPanel: document.querySelector("#settingsPanel"),
   settingsToggle: document.querySelector("#settingsTop"),
-  sidebarSettings: document.querySelector("#sidebarSettings"),
+  workspace: document.querySelector(".workspace"),
+  appSidebar: document.querySelector(".app-sidebar"),
   settingsBackdrop: document.querySelector("#settingsBackdrop"),
-  userMenu: document.querySelector("#userMenu"),
-  userSearch: document.querySelector("#userSearch"),
-  userOptions: document.querySelector("#userOptions"),
   currentUserName: document.querySelector("#currentUserName"),
+  currentUserLevel: document.querySelector("#currentUserLevel"),
+  logoutButton: document.querySelector("#logoutButton"),
+  adminButton: document.querySelector("#adminButton"),
+  adminPanel: document.querySelector("#adminPanel"),
+  adminClose: document.querySelector("#adminClose"),
+  adminError: document.querySelector("#adminError"),
+  adminStatus: document.querySelector("#adminStatus"),
+  adminSearchForm: document.querySelector("#adminSearchForm"),
+  adminSearch: document.querySelector("#adminSearch"),
+  adminSearchButton: document.querySelector("#adminSearchButton"),
+  adminNew: document.querySelector("#adminNew"),
+  adminUsers: document.querySelector("#adminUsers"),
+  adminCount: document.querySelector("#adminCount"),
+  adminPrev: document.querySelector("#adminPrev"),
+  adminNext: document.querySelector("#adminNext"),
+  accountForm: document.querySelector("#accountForm"),
+  accountFormTitle: document.querySelector("#accountFormTitle"),
+  accountUsername: document.querySelector("#accountUsername"),
+  accountPassword: document.querySelector("#accountPassword"),
+  accountPasswordLabel: document.querySelector("#accountPasswordLabel"),
+  accountLevel: document.querySelector("#accountLevel"),
+  accountAdmin: document.querySelector("#accountAdmin"),
+  accountActive: document.querySelector("#accountActive"),
+  accountHint: document.querySelector("#accountHint"),
+  accountSave: document.querySelector("#accountSave"),
+  accountCancel: document.querySelector("#accountCancel"),
   userAvatar: document.querySelector("#userAvatar"),
   conversationNav: document.querySelector(".conversation-nav"),
   loginOverlay: document.querySelector("#loginOverlay"),
   loginForm: document.querySelector("#loginForm"),
-  loginUserId: document.querySelector("#loginUserId"),
+  loginUsername: document.querySelector("#loginUsername"),
+  loginPassword: document.querySelector("#loginPassword"),
+  loginSubmit: document.querySelector("#loginSubmit"),
+  loginSubmitLabel: document.querySelector("#loginSubmitLabel"),
+  loginError: document.querySelector("#loginError"),
+  loginStatus: document.querySelector("#loginStatus"),
   closeSettings: document.querySelector("#closeSettings"),
   topNewThread: document.querySelector("#topNewThread"),
   clearChat: document.querySelector("#clearChat"),
@@ -42,7 +71,22 @@ const state = {
   assistantRenderFrame: null,
   toolCards: new Map(),
   toolActivities: new Map(),
-  users: [],
+  currentUser: null,
+  authVersion: 0,
+  loginBusy: false,
+  loggingOut: false,
+  busy: false,
+  runController: null,
+  threadListVersion: 0,
+  adminOpen: false,
+  adminSaving: false,
+  adminLoading: false,
+  accountUsers: [],
+  editingAccountId: null,
+  accountOffset: 0,
+  accountTotal: 0,
+  accountQuery: "",
+  accountRequestVersion: 0,
   todos: [],
   planRunStatus: "",
   viewVersion: 0,
@@ -50,11 +94,11 @@ const state = {
 };
 
 const EXAMPLE_PROMPT = "你是一个专业影视创作助手。回答要简洁，优先给出可执行方案；涉及分镜时输出镜号、景别、镜头运动和画面描述。";
+const responseVersions = new WeakMap();
 
 renderEmpty();
 updatePromptState();
-checkHealth();
-loadSkills();
+restoreSession();
 
 els.agentRole.addEventListener("change", updatePromptState);
 els.topbarAgentRole.addEventListener("change", () => {
@@ -69,7 +113,32 @@ els.messages.addEventListener("wheel", (event) => {
   }
 }, { passive: true });
 els.settingsToggle.addEventListener("click", () => setSettingsOpen(true));
-els.sidebarSettings.addEventListener("click", toggleUserMenu);
+els.logoutButton.addEventListener("click", logout);
+els.adminButton.addEventListener("click", openAccountManagement);
+els.adminClose.addEventListener("click", () => closeAccountManagement());
+els.adminPanel.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeAccountManagement();
+});
+els.adminPanel.addEventListener("click", (event) => {
+  if (event.target === els.adminPanel) closeAccountManagement();
+});
+els.accountForm.addEventListener("submit", saveAccount);
+els.adminNew.addEventListener("click", () => editAccount());
+els.accountCancel.addEventListener("click", () => editAccount());
+els.adminSearchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  state.accountQuery = els.adminSearch.value.trim();
+  state.accountOffset = 0;
+  loadAccounts();
+});
+els.adminPrev.addEventListener("click", () => {
+  state.accountOffset = Math.max(0, state.accountOffset - 20);
+  loadAccounts();
+});
+els.adminNext.addEventListener("click", () => {
+  state.accountOffset += 20;
+  loadAccounts();
+});
 els.closeSettings.addEventListener("click", () => setSettingsOpen(false));
 els.settingsBackdrop.addEventListener("click", () => setSettingsOpen(false));
 els.topNewThread.addEventListener("click", () => els.newThread.click());
@@ -82,29 +151,11 @@ els.prompt.addEventListener("input", autoResizePrompt);
 els.prompt.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") els.composer.requestSubmit();
 });
-els.userSearch.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && els.userSearch.value.trim()) selectUser(els.userSearch.value.trim());
-});
-els.loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const userId = els.loginUserId.value.trim();
-  if (!userId) return;
-  await selectUser(userId);
-  els.loginOverlay.classList.add("hidden");
-  els.prompt.focus();
-});
+els.loginForm.addEventListener("submit", submitLogin);
 
 els.newThread.addEventListener("click", () => {
-  state.viewVersion += 1;
-  state.followOutput = true;
-  renderPlan([]);
-  els.threadId.value = "";
-  els.runId.textContent = "-";
-  state.assistantNode = null;
-  state.toolCards.clear();
-  state.toolActivities.clear();
-  setStatus("idle");
-  renderEmpty();
+  if (!state.currentUser || state.loggingOut) return;
+  resetConversation();
   els.skillOptions.querySelectorAll("input").forEach((input) => {
     input.checked = false;
   });
@@ -121,6 +172,11 @@ els.fillPrompt.addEventListener("click", () => {
 
 els.composer.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!state.currentUser) {
+    requireLogin();
+    return;
+  }
+  if (state.busy || state.loggingOut) return;
   const text = els.prompt.value.trim();
   const imageUrl = els.imageUrl.value.trim();
   if (!text && !imageUrl) return;
@@ -131,7 +187,7 @@ els.composer.addEventListener("submit", async (event) => {
     return;
   }
 
-  state.viewVersion += 1;
+  const viewVersion = ++state.viewVersion;
   state.followOutput = true;
   renderPlan([]);
   appendMessage("user", [text, imageUrl && `[image] ${imageUrl}`].filter(Boolean).join("\n"));
@@ -148,23 +204,27 @@ els.composer.addEventListener("submit", async (event) => {
       await runJson(body);
     }
   } catch (err) {
+    if (viewVersion !== state.viewVersion || err.name === "AbortError") return;
     renderPlan(state.todos, "failed");
     appendMessage("error", err.message || String(err));
     setStatus("failed");
   } finally {
-    finishAssistantBlock();
-    setBusy(false);
+    if (viewVersion === state.viewVersion) {
+      finishAssistantBlock();
+      state.runController = null;
+      setBusy(false);
+    }
   }
 });
 
 function updatePromptState() {
   const hasThread = Boolean(els.threadId.value.trim());
   const usesCustomPrompt = !els.agentRole.value.trim();
-  els.agentPrompt.disabled = hasThread || !usesCustomPrompt;
+  els.agentPrompt.disabled = hasThread || !usesCustomPrompt || state.busy || !state.currentUser || state.loggingOut;
   els.agentPrompt.closest("label").classList.toggle("disabled", els.agentPrompt.disabled);
   els.topbarAgentRole.disabled = hasThread || els.agentRole.disabled;
   els.skillOptions.querySelectorAll("input").forEach((input) => {
-    input.disabled = hasThread;
+    input.disabled = hasThread || state.busy || !state.currentUser || state.loggingOut;
   });
   els.skillOptions.classList.toggle("disabled", hasThread);
   if (hasThread) {
@@ -178,7 +238,7 @@ function updatePromptState() {
 }
 
 function validateControls() {
-  if (!els.userId.value.trim()) return "缺少 User ID";
+  if (!state.currentUser) return "请先登录";
   if (els.threadId.value.trim()) return "";
   if (els.agentRole.value.trim()) return "";
   if (!els.agentPrompt.value.trim()) return "新会话使用 custom prompt 时，需要填写 Agent Prompt";
@@ -200,7 +260,6 @@ function buildRunBody(text, imageUrl) {
   const threadId = els.threadId.value.trim();
   const agentRole = els.agentRole.value.trim();
   const body = {
-    user_id: els.userId.value.trim(),
     thread_id: threadId || null,
     stream: true,
     content,
@@ -217,11 +276,13 @@ function buildRunBody(text, imageUrl) {
 }
 
 async function loadSkills() {
+  const authVersion = state.authVersion;
   try {
-    const response = await fetch("/v1/skills");
+    const response = await apiFetch("/v1/skills");
     const data = await readJson(response);
     renderSkills(data.skills || []);
   } catch (err) {
+    if (authVersion !== state.authVersion) return;
     els.skillOptions.textContent = `技能列表加载失败：${err.message || String(err)}`;
   }
 }
@@ -256,12 +317,16 @@ function selectedSkillIds() {
 }
 
 async function runJson(body) {
-  const response = await fetch("/v1/runs", {
+  const viewVersion = state.viewVersion;
+  state.runController = new AbortController();
+  const response = await apiFetch("/v1/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: state.runController.signal,
   });
   const data = await readJson(response);
+  if (viewVersion !== state.viewVersion) return;
   applyRunMeta(data);
   renderPlan(data.todos || [], data.status);
   if (data.error) {
@@ -274,28 +339,41 @@ async function runJson(body) {
 }
 
 async function runStream(body) {
-  const response = await fetch("/v1/runs", {
+  const viewVersion = state.viewVersion;
+  const authVersion = state.authVersion;
+  state.runController = new AbortController();
+  const response = await apiFetch("/v1/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: state.runController.signal,
   });
   if (!response.ok || !response.body) {
-    throw new Error(await response.text());
+    await readJson(response);
+    throw new Error("服务器没有返回对话内容");
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() || "";
-    for (const rawEvent of events) handleSseEvent(rawEvent);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (viewVersion !== state.viewVersion || authVersion !== state.authVersion) {
+        await reader.cancel();
+        return;
+      }
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() || "";
+      for (const rawEvent of events) handleSseEvent(rawEvent);
+    }
+    if (buffer.trim()) handleSseEvent(buffer);
+  } finally {
+    reader.releaseLock();
   }
-  if (buffer.trim()) handleSseEvent(buffer);
 }
 
 function handleSseEvent(rawEvent) {
@@ -369,19 +447,30 @@ function renderPlan(todos, runStatus = "") {
 
 async function readJson(response) {
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  const authVersion = responseVersions.get(response);
+  if (authVersion !== undefined && authVersion !== state.authVersion) throw staleRequest();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`服务响应异常（HTTP ${response.status}），请稍后重试`);
+  }
   if (!response.ok) {
-    throw new Error(data.error?.message || text || `HTTP ${response.status}`);
+    const error = new Error(data.error?.message || text || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = data.error?.code;
+    throw error;
   }
   return data;
 }
 
 async function checkHealth() {
+  const authVersion = state.authVersion;
   try {
     const response = await fetch("/health");
-    setStatus(response.ok ? "ready" : "unhealthy");
+    if (authVersion === state.authVersion && state.currentUser && !state.busy) setStatus(response.ok ? "ready" : "unhealthy");
   } catch {
-    setStatus("offline");
+    if (authVersion === state.authVersion && state.currentUser && !state.busy) setStatus("offline");
   }
 }
 
@@ -686,68 +775,196 @@ function renderEmpty() {
   els.messages.innerHTML = '<div class="empty">向我提问公司的请假、报销、审批流程或其他制度问题，我会检索已启用的制度资料并给出依据。</div>';
 }
 
-async function toggleUserMenu() {
-  const open = !els.userMenu.classList.contains("open");
-  els.userMenu.classList.toggle("open", open);
-  els.sidebarSettings.setAttribute("aria-expanded", String(open));
-  if (!open) return;
-  els.userSearch.value = "";
-  await loadUsers();
-  els.userSearch.focus();
+function staleRequest() {
+  const error = new Error("请求已取消");
+  error.name = "AbortError";
+  return error;
 }
 
-async function loadUsers() {
-  try {
-    const response = await fetch("/v1/threads/users");
-    const data = await readJson(response);
-    state.users = data.users || [];
-    renderUserOptions(state.users);
-  } catch (err) {
-    els.userOptions.textContent = `用户加载失败：${err.message || String(err)}`;
+async function apiFetch(path, options = {}) {
+  const authVersion = state.authVersion;
+  const response = await fetch(path, { credentials: "same-origin", cache: "no-store", ...options });
+  if (authVersion !== state.authVersion) throw staleRequest();
+  if (response.status === 401) {
+    requireLogin(state.currentUser ? "登录已过期或账号已停用，请重新登录。" : "");
+    throw new Error("请重新登录");
   }
+  responseVersions.set(response, authVersion);
+  return response;
 }
 
-function renderUserOptions(users) {
-  els.userOptions.replaceChildren();
-  const choices = [...new Set([els.userId.value.trim(), ...users].filter(Boolean))];
-  for (const userId of choices) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "user-option";
-    button.textContent = userId;
-    button.addEventListener("click", () => selectUser(userId));
-    els.userOptions.appendChild(button);
-  }
-  if (!choices.length) els.userOptions.textContent = "暂无历史用户；可直接输入 User ID。";
+function setWorkspaceLocked(locked) {
+  els.workspace.inert = locked;
+  els.appSidebar.inert = locked;
+  els.settingsPanel.inert = locked;
 }
 
-async function selectUser(userId) {
+function setLoginBusy(busy, checking = false) {
+  state.loginBusy = busy;
+  els.loginUsername.disabled = busy;
+  els.loginPassword.disabled = busy;
+  els.loginSubmit.disabled = busy;
+  els.loginForm.setAttribute("aria-busy", String(busy));
+  els.loginSubmitLabel.textContent = checking ? "正在检查…" : busy ? "正在登录…" : "登录工作区";
+  els.loginStatus.textContent = checking ? "正在检查登录状态…" : busy ? "正在验证账号…" : "";
+}
+
+function showLoginError(message = "") {
+  els.loginError.textContent = message;
+  els.loginError.hidden = !message;
+}
+
+function resetConversation() {
   state.viewVersion += 1;
-  state.followOutput = true;
-  renderPlan([]);
-  els.userId.value = userId;
-  els.currentUserName.textContent = userId;
-  els.userAvatar.textContent = userId.slice(0, 2).toUpperCase();
-  els.userMenu.classList.remove("open");
-  els.sidebarSettings.setAttribute("aria-expanded", "false");
-  els.threadId.value = "";
-  els.runId.textContent = "-";
+  state.runController?.abort();
+  state.runController = null;
+  if (state.assistantRenderFrame !== null) cancelAnimationFrame(state.assistantRenderFrame);
+  state.assistantRenderFrame = null;
   state.assistantNode = null;
+  state.followOutput = true;
   state.toolCards.clear();
   state.toolActivities.clear();
+  renderPlan([]);
+  els.threadId.value = "";
+  els.runId.textContent = "-";
+  els.prompt.value = "";
+  els.imageUrl.value = "";
   renderEmpty();
+  setBusy(false, "idle");
+}
+
+function requireLogin(message = "") {
+  state.authVersion += 1;
+  state.currentUser = null;
+  state.loggingOut = false;
+  closeAccountManagement(true);
+  resetConversation();
+  els.userId.value = "";
+  els.currentUserName.textContent = "未登录";
+  els.currentUserLevel.textContent = "请先登录";
+  els.userAvatar.textContent = "?";
+  els.logoutButton.hidden = true;
+  els.logoutButton.disabled = false;
+  els.adminButton.hidden = true;
+  els.agentPrompt.value = "";
+  els.agentRole.value = "enterprise_policy_advisor";
+  els.skillOptions.replaceChildren();
+  els.skillOptions.textContent = "登录后加载技能列表";
+  renderThreads([]);
+  setSettingsOpen(false);
+  setWorkspaceLocked(true);
+  els.loginPassword.value = "";
+  els.loginOverlay.classList.remove("hidden");
+  els.loginOverlay.setAttribute("aria-hidden", "false");
+  setLoginBusy(false);
+  showLoginError(message);
+  setStatus("signed_out");
   updatePromptState();
-  await loadThreads();
+  els.loginUsername.focus();
+}
+
+async function enterWorkspace(user) {
+  state.authVersion += 1;
+  state.currentUser = user;
+  state.loggingOut = false;
+  resetConversation();
+  renderCurrentAccount();
+  els.logoutButton.hidden = false;
+  els.logoutButton.disabled = false;
+  els.loginPassword.value = "";
+  setLoginBusy(false);
+  showLoginError();
+  // Move focus before hiding the modal from assistive technology.
+  setWorkspaceLocked(false);
+  els.loginOverlay.classList.add("hidden");
+  els.prompt.focus();
+  els.loginOverlay.setAttribute("aria-hidden", "true");
+  setStatus("ready");
+  checkHealth();
+  await Promise.all([loadSkills(), loadThreads()]);
+}
+
+async function restoreSession() {
+  const authVersion = state.authVersion;
+  setWorkspaceLocked(true);
+  setBusy(false);
+  setLoginBusy(true, true);
+  try {
+    const response = await apiFetch("/v1/auth/me");
+    const user = await readJson(response);
+    if (authVersion === state.authVersion) await enterWorkspace(user);
+  } catch (err) {
+    if (authVersion === state.authVersion) requireLogin("暂时无法检查登录状态，请重新登录或稍后重试。");
+  }
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  if (state.loginBusy) return;
+  const username = els.loginUsername.value.trim();
+  const password = els.loginPassword.value;
+  if (!username || !password) {
+    showLoginError("请输入账号和密码。");
+    return;
+  }
+  const authVersion = state.authVersion;
+  setLoginBusy(true);
+  showLoginError();
+  try {
+    const response = await fetch("/v1/auth/login", {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    responseVersions.set(response, authVersion);
+    const data = await readJson(response);
+    if (authVersion !== state.authVersion) return;
+    // The browser uses the HttpOnly cookie; do not persist the returned access_token.
+    await enterWorkspace(data.user);
+  } catch (err) {
+    if (authVersion !== state.authVersion) return;
+    els.loginPassword.value = "";
+    showLoginError(err.message || "登录失败，请稍后重试。");
+  } finally {
+    if (authVersion === state.authVersion) {
+      setLoginBusy(false);
+      els.loginPassword.focus();
+    }
+  }
+}
+
+async function logout() {
+  if (!state.currentUser || state.loggingOut) return;
+  const authVersion = state.authVersion;
+  state.loggingOut = true;
+  els.logoutButton.disabled = true;
+  resetConversation();
+  try {
+    const response = await apiFetch("/v1/auth/logout", { method: "POST" });
+    if (!response.ok) await readJson(response);
+    requireLogin();
+  } catch (err) {
+    if (authVersion === state.authVersion) appendMessage("error", `退出失败：${err.message || "请稍后重试"}`);
+  } finally {
+    if (authVersion === state.authVersion) {
+      state.loggingOut = false;
+      els.logoutButton.disabled = false;
+      setBusy(false);
+    }
+  }
 }
 
 async function loadThreads() {
-  const userId = els.userId.value.trim();
-  if (!userId) return;
+  if (!state.currentUser) return;
+  const authVersion = state.authVersion;
+  const listVersion = ++state.threadListVersion;
   try {
-    const response = await fetch(`/v1/threads/by-user/${encodeURIComponent(userId)}`);
+    const response = await apiFetch("/v1/threads/mine");
     const data = await readJson(response);
+    if (listVersion !== state.threadListVersion) return;
     renderThreads(data.threads || []);
   } catch (err) {
+    if (authVersion !== state.authVersion || listVersion !== state.threadListVersion) return;
     renderThreads([], err.message || String(err));
   }
 }
@@ -788,6 +1005,11 @@ function renderThreads(threads, error = "") {
 }
 
 async function openThread(thread) {
+  if (!state.currentUser || state.loggingOut) return;
+  state.runController?.abort();
+  state.runController = null;
+  finishAssistantBlock();
+  setBusy(false);
   const viewVersion = ++state.viewVersion;
   state.followOutput = true;
   renderPlan([]);
@@ -801,7 +1023,7 @@ async function openThread(thread) {
     item.classList.toggle("active", item.dataset.threadId === thread.thread_id);
   });
   try {
-    const response = await fetch(`/v1/threads/${encodeURIComponent(thread.thread_id)}/messages?user_id=${encodeURIComponent(els.userId.value)}&page=1&page_size=100`);
+    const response = await apiFetch(`/v1/threads/${encodeURIComponent(thread.thread_id)}/messages?page=1&page_size=100`);
     const data = await readJson(response);
     if (viewVersion !== state.viewVersion) return;
     renderPlan(data.todos || [], data.run_status);
@@ -849,6 +1071,7 @@ function setStatus(status) {
     failed: "查询失败",
     unhealthy: "服务异常",
     offline: "服务未连接",
+    signed_out: "请先登录",
   };
   els.status.textContent = labels[status] || status;
   if (els.statusDot) els.statusDot.style.background = status === "failed" || status === "offline" ? "#e16d68" : status === "running" ? "#dfaa44" : "#55bd88";
@@ -857,12 +1080,18 @@ function setStatus(status) {
 }
 
 function setBusy(busy, status) {
-  els.send.disabled = busy;
-  els.agentRole.disabled = busy;
-  els.topbarAgentRole.disabled = busy || Boolean(els.threadId.value.trim());
-  els.threadId.disabled = busy;
+  state.busy = busy;
+  const disabled = busy || !state.currentUser || state.loggingOut;
+  els.send.disabled = disabled;
+  els.prompt.disabled = !state.currentUser || state.loggingOut;
+  els.agentRole.disabled = disabled;
+  els.topbarAgentRole.disabled = disabled || Boolean(els.threadId.value.trim());
+  els.threadId.disabled = disabled;
+  els.newThread.disabled = !state.currentUser || state.loggingOut;
+  els.topNewThread.disabled = !state.currentUser || state.loggingOut;
+  els.clearChat.disabled = !state.currentUser || state.loggingOut;
   els.skillOptions.querySelectorAll("input").forEach((input) => {
-    input.disabled = busy || Boolean(els.threadId.value.trim());
+    input.disabled = disabled || Boolean(els.threadId.value.trim());
   });
   if (status) setStatus(status);
   updatePromptState();
@@ -871,4 +1100,221 @@ function setBusy(busy, status) {
 function autoResizePrompt() {
   els.prompt.style.height = "auto";
   els.prompt.style.height = `${Math.min(els.prompt.scrollHeight, 160)}px`;
+}
+
+function renderCurrentAccount() {
+  const user = state.currentUser;
+  if (!user) return;
+  els.userId.value = user.user_id;
+  els.currentUserName.textContent = user.username;
+  const levels = { 1: "初级用户", 2: "中级用户", 3: "高级用户" };
+  els.currentUserLevel.textContent = `${user.username} · ${user.is_admin ? "管理员" : levels[user.access_level] || "用户"}`;
+  els.userAvatar.textContent = user.username.slice(0, 2).toUpperCase();
+  els.adminButton.hidden = !user.is_admin;
+}
+
+function showAccountError(message = "") {
+  els.adminError.textContent = message;
+  els.adminError.hidden = !message;
+}
+
+async function openAccountManagement() {
+  if (!state.currentUser?.is_admin || state.loggingOut) return;
+  state.adminOpen = true;
+  state.accountOffset = 0;
+  state.accountQuery = "";
+  els.adminSearch.value = "";
+  els.adminStatus.textContent = "";
+  showAccountError();
+  setSettingsOpen(false);
+  setWorkspaceLocked(true);
+  els.adminPanel.hidden = false;
+  editAccount();
+  await loadAccounts();
+}
+
+function closeAccountManagement(force = false) {
+  if (state.adminSaving && !force) return;
+  const wasOpen = state.adminOpen;
+  state.adminOpen = false;
+  state.adminSaving = false;
+  state.adminLoading = false;
+  state.accountRequestVersion += 1;
+  state.accountUsers = [];
+  state.editingAccountId = null;
+  state.accountTotal = 0;
+  els.adminPanel.hidden = true;
+  els.adminUsers.replaceChildren();
+  els.accountUsername.value = "";
+  els.accountPassword.value = "";
+  els.adminSearch.value = "";
+  els.adminCount.textContent = "";
+  els.adminStatus.textContent = "";
+  showAccountError();
+  if (wasOpen) {
+    setWorkspaceLocked(!state.currentUser);
+    if (state.currentUser && !force) els.adminButton.focus();
+  }
+}
+
+function updateAccountControls() {
+  const saving = state.adminSaving;
+  const self = state.editingAccountId === state.currentUser?.user_id;
+  [els.accountUsername, els.accountPassword, els.accountLevel, els.accountCancel,
+    els.adminNew, els.adminSearch, els.adminSearchButton, els.adminClose].forEach((element) => {
+    element.disabled = saving;
+  });
+  els.accountAdmin.disabled = saving || self;
+  els.accountActive.disabled = saving || self;
+  els.accountSave.disabled = saving || state.adminLoading;
+  els.accountSave.textContent = saving ? "正在保存…" : state.editingAccountId ? "保存修改" : "创建账号";
+  els.adminPrev.disabled = saving || state.adminLoading || state.accountOffset === 0;
+  els.adminNext.disabled = saving || state.adminLoading || state.accountOffset + 20 >= state.accountTotal;
+  els.accountForm.setAttribute("aria-busy", String(saving));
+  els.adminUsers.querySelectorAll("button").forEach((button) => { button.disabled = saving; });
+}
+
+function editAccount(account = null) {
+  if (state.adminSaving) return;
+  state.editingAccountId = account?.user_id || null;
+  els.accountFormTitle.textContent = account ? "编辑账号" : "新增账号";
+  els.accountUsername.value = account?.username || "";
+  els.accountPassword.value = "";
+  els.accountPassword.required = !account;
+  els.accountPasswordLabel.textContent = account ? "重置密码（选填）" : "初始密码";
+  els.accountPassword.placeholder = account ? "留空则保留原密码" : "请输入初始密码";
+  els.accountLevel.value = String(account?.access_level || 1);
+  els.accountAdmin.checked = Boolean(account?.is_admin);
+  els.accountActive.checked = account ? account.is_active : true;
+  const self = account?.user_id === state.currentUser?.user_id;
+  els.accountHint.textContent = self ? "不能停用当前账号或取消自己的管理员身份。重置自己的密码后需要重新登录。" :
+    account ? "用户名修改后保留历史会话。重置密码或停用账号会注销该账号的登录状态。" : "新账号默认使用初级权限。";
+  els.accountCancel.textContent = account ? "取消编辑" : "清空";
+  showAccountError();
+  updateAccountControls();
+  if (state.adminOpen) els.accountUsername.focus();
+}
+
+function handleAccountError(error) {
+  if (error.status === 403 && error.code === "ACCESS_DENIED") {
+    if (state.currentUser) state.currentUser.is_admin = false;
+    renderCurrentAccount();
+    closeAccountManagement(true);
+    appendMessage("error", "管理员权限已取消，无法继续管理账号。");
+    return;
+  }
+  showAccountError(error.message || "账户管理暂时不可用，请稍后重试。");
+}
+
+async function loadAccounts() {
+  if (!state.adminOpen || state.adminSaving || !state.currentUser?.is_admin) return;
+  const authVersion = state.authVersion;
+  const requestVersion = ++state.accountRequestVersion;
+  state.adminLoading = true;
+  showAccountError();
+  els.adminCount.textContent = "正在加载账号…";
+  updateAccountControls();
+  try {
+    const query = new URLSearchParams({ q: state.accountQuery, limit: "20", offset: String(state.accountOffset) });
+    const response = await apiFetch(`/v1/admin/users?${query}`);
+    const data = await readJson(response);
+    if (requestVersion !== state.accountRequestVersion || !state.adminOpen) return;
+    state.accountUsers = data.users || [];
+    state.accountTotal = data.total || 0;
+    renderAccounts();
+  } catch (error) {
+    if (authVersion !== state.authVersion || requestVersion !== state.accountRequestVersion || !state.adminOpen) return;
+    state.accountUsers = [];
+    state.accountTotal = 0;
+    renderAccounts();
+    handleAccountError(error);
+  } finally {
+    if (authVersion === state.authVersion && requestVersion === state.accountRequestVersion && state.adminOpen) {
+      state.adminLoading = false;
+      updateAccountControls();
+    }
+  }
+}
+
+function renderAccounts() {
+  els.adminUsers.replaceChildren();
+  const levels = { 1: "初级", 2: "中级", 3: "高级" };
+  for (const account of state.accountUsers) {
+    const row = document.createElement("tr");
+    const values = [account.username, levels[account.access_level], account.is_admin ? "管理员" : "普通用户",
+      account.is_active ? "启用" : "停用", account.last_login_at ? new Date(account.last_login_at).toLocaleString("zh-CN", { hour12: false }) : "尚未登录"];
+    for (const value of values) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.appendChild(cell);
+    }
+    const action = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "编辑";
+    button.addEventListener("click", () => editAccount(account));
+    action.appendChild(button);
+    row.appendChild(action);
+    els.adminUsers.appendChild(row);
+  }
+  if (!state.accountUsers.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    cell.textContent = "没有匹配的账号";
+    row.appendChild(cell);
+    els.adminUsers.appendChild(row);
+  }
+  els.adminCount.textContent = `共 ${state.accountTotal} 个账号 · 第 ${Math.floor(state.accountOffset / 20) + 1}/${Math.max(1, Math.ceil(state.accountTotal / 20))} 页`;
+}
+
+async function saveAccount(event) {
+  event.preventDefault();
+  if (!state.adminOpen || state.adminSaving || state.adminLoading || !state.currentUser?.is_admin) return;
+  const authVersion = state.authVersion;
+  const userId = state.editingAccountId;
+  const username = els.accountUsername.value.trim();
+  const password = els.accountPassword.value;
+  if (!username || (!userId && !password)) {
+    showAccountError("请输入账号和初始密码。");
+    return;
+  }
+  const values = { username, access_level: Number(els.accountLevel.value),
+    is_admin: els.accountAdmin.checked, is_active: els.accountActive.checked };
+  if (password) values.password = password;
+  state.adminSaving = true;
+  els.adminStatus.textContent = "";
+  showAccountError();
+  updateAccountControls();
+  try {
+    const response = await apiFetch(userId ? `/v1/admin/users/${encodeURIComponent(userId)}` : "/v1/admin/users", {
+      method: userId ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+    });
+    const account = await readJson(response);
+    if (authVersion !== state.authVersion || !state.adminOpen) return;
+    els.accountPassword.value = "";
+    if (account.user_id === state.currentUser.user_id) {
+      if (password) {
+        requireLogin("密码已更新，请使用新密码重新登录。");
+        return;
+      }
+      state.currentUser = { user_id: account.user_id, username: account.username,
+        access_level: account.access_level, is_admin: account.is_admin };
+      renderCurrentAccount();
+    }
+    state.adminSaving = false;
+    editAccount();
+    els.adminStatus.textContent = userId ? "账号已更新。" : "账号已创建。";
+    state.accountOffset = 0;
+    state.accountQuery = "";
+    els.adminSearch.value = "";
+    await loadAccounts();
+  } catch (error) {
+    if (authVersion === state.authVersion && state.adminOpen) handleAccountError(error);
+  } finally {
+    if (authVersion === state.authVersion && state.adminOpen) {
+      state.adminSaving = false;
+      updateAccountControls();
+    }
+  }
 }

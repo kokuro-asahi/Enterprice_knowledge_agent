@@ -131,11 +131,18 @@ async def http_exception_handler(request: FastAPIRequest, exc: HTTPException) ->
 
 
 async def validation_exception_handler(request: FastAPIRequest, exc: RequestValidationError) -> JSONResponse:
+    details = exc.errors()
+    if request.url.path == "/v1/auth/login" or request.url.path.startswith("/v1/admin/users"):
+        # Login validation errors must not echo a submitted password or request body.
+        details = [
+            {key: value for key, value in item.items() if key not in {"input", "ctx"}}
+            for item in details
+        ]
     return JSONResponse(
         status_code=422,
         content={
             "error": error_info(ErrorCode.VALIDATION_FAILED),
-            "details": jsonable_encoder(exc.errors()),
+            "details": jsonable_encoder(details),
         },
     )
 

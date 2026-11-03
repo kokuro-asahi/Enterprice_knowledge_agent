@@ -6,10 +6,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
+from app.api.auth import router as auth_router
+from app.api.admin import router as admin_router
 from app.api.runs import router as runs_router
 from app.api.skills import router as skills_router
 from app.api.threads import router as threads_router
 from app.business_store import business_store
+from app.config import get_settings
 from app.errors import http_exception_handler, unhandled_exception_handler, validation_exception_handler
 from app.request_logging import request_log_middleware
 from app.runtime import runtime
@@ -20,7 +23,7 @@ def create_app() -> FastAPI:
     static_dir = Path(__file__).resolve().parent / "static"
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=list(get_settings().cors_allowed_origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -30,6 +33,8 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    app.include_router(auth_router)
+    app.include_router(admin_router)
     app.include_router(runs_router)
     app.include_router(skills_router)
     app.include_router(threads_router)
