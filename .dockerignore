@@ -16,3 +16,6 @@ scripts/
 alembic/
 README.md
 version.md
+frontend/node_modules/
+frontend/coverage/
+app/static/

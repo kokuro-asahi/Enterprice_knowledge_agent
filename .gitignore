@@ -5,3 +5,16 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+frontend/node_modules/
+frontend/coverage/
+frontend/*.tsbuildinfo
+
+# Local Agent concurrency benchmarks and reports
+/scripts/benchmark_enterprise_concurrency.py
+/scripts/benchmark_observed_server.py
+/scripts/analyze_enterprise_benchmark.py
+/scripts/write_enterprise_report.py
+/scripts/retest_contract.py
+/scripts/ENTERPRISE_BENCHMARK.md
+/tests/test_enterprise_benchmark.py
+/scripts/benchmark_results/

@@ -24,6 +24,51 @@ Phase-one backend for the Agent interface described in the attached API and tech
 
 ## Local Setup
 
+### React 前端
+
+前端源码位于 `frontend/`，使用 React、TypeScript 和 Vite，保留原有聊天界面及
+登录、历史会话、执行计划、工具检索卡片、技能配置和账户管理功能。
+`app/static/` 是构建输出，随仓库保留以支持原有的 Python 启动方式；请修改
+`frontend/src/`，并重新构建，勿直接编辑生成文件。
+
+需要 Node.js 20.19+ 或 22.12+。首次安装、验证并构建：
+
+```bash
+cd frontend
+npm ci
+npm test
+npm run build
+```
+
+构建后按原方式启动 FastAPI，访问后端首页即可。已有服务构建后刷新页面即可加载
+新版前端；生产部署应一起更新 `app/static/index.html` 和 `app/static/assets/`。
+Docker 使用 Node 构建阶段自动生成前端，最终运行镜像只需要 Python。
+
+前端开发时，先在仓库根目录启动后端：
+
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 1752
+```
+
+再在另一个终端运行：
+
+```bash
+cd frontend
+npm run dev
+```
+
+访问 `http://localhost:5173`。Vite 将 `/v1` 和 `/health` 同源代理到
+`http://127.0.0.1:1752`，保留浏览器 Host/Origin 以配合现有的 Cookie 来源校验，
+不需要开放跨域。后端端口不同时，使用
+`API_PROXY_TARGET=http://127.0.0.1:8000 npm run dev`。
+登录继续使用 HttpOnly Cookie，前端不保存登录接口返回的 access token。
+
+前端检查：`cd frontend && npm test`、`npm run typecheck`、`npm run build`。
+原有 `node --test tests/frontend.test.cjs` 入口仍会转发到 React 测试套件。
+后端检查仍使用 `python -m pytest -q`。
+
+### Python 后端
+
 ```bash
 python -m venv .venv
 . .venv/bin/activate

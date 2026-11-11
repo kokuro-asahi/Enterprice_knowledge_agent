@@ -1,4 +1,8 @@
 /* Final visual layer: blue application chrome, white conversation canvas. */
+#root { height: 100%; }
+.history-loading { margin: auto; color: #71818a; font-size: 14px; }
+.workspace { position: relative; }
+.workspace-error { position: absolute; bottom: 8px; left: 24px; right: 24px; border-radius: 8px; padding: 10px; background: #fff4f2; color: #a83d32; }
 .login-overlay { overflow-y: auto; }
 .login-card { max-height: none; margin: auto; }
 .login-card button:disabled { cursor: wait; opacity: .65; }
